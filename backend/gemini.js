@@ -4,6 +4,9 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const MODEL_NAME = "gemini-3.8-flash";
+const MAX_GEMINI_RETRIES = 2;
+const TEMPORARY_UNAVAILABLE_NOTICE =
+  "Gemini is temporarily overloaded. Here's a basic study fallback; try again shortly for a Gemini response.";
 
 const SYSTEM_INSTRUCTION = `You are StudyMate AI, a friendly, patient and highly effective AI tutor.
 
@@ -34,6 +37,31 @@ function getClient() {
     return null;
   }
   return new GoogleGenAI({ apiKey });
+}
+
+function isTransientGeminiError(error) {
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
+  return status === 408 || status === 429 || (status >= 500 && status < 600) ||
+    /\b(?:408|429|5\d{2})\b|overloaded|high demand|temporarily unavailable|try again later/i
+      .test(error?.message || "");
+}
+
+async function createInteraction(client, request) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await client.interactions.create(request);
+    } catch (error) {
+      if (!isTransientGeminiError(error) || attempt >= MAX_GEMINI_RETRIES) {
+        throw error;
+      }
+
+      const delayMs = 500 * (2 ** attempt);
+      console.warn(
+        `[StudyMate AI] Gemini temporarily unavailable; retrying in ${delayMs}ms (${attempt + 1}/${MAX_GEMINI_RETRIES}).`
+      );
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
 }
 
 /**
@@ -167,6 +195,28 @@ function getFallbackQuiz(topic = "General Science & Tech", level = "beginner") {
   ];
 }
 
+function getFallbackExplanation(action) {
+  if (action === "summarize") {
+    return `📌 Summary & Key Takeaways
+
+• Core Concept: Break complex topics into simpler, self-contained building blocks.
+• Real-World Rule: Analogy helps bridge abstract theory into concrete understanding.
+• Best Practice: Practice with small examples before tackling large problems.
+• Exam Tip: Always state the definition, a real-world example, and key trade-offs.`;
+  }
+  if (action === "example") {
+    return `💡 Additional Real-Life Example
+
+Imagine you are building a Lego castle. Instead of manufacturing plastic bricks from scratch, you use pre-molded standard bricks that connect seamlessly. Each brick does one job reliably, and when stacked together, they create something grand!`;
+  }
+  return `🧠 Explained Even Simpler
+
+Let's strip away all technical jargon!
+
+Imagine explaining this to a 10-year-old:
+Think of it like following a simple recipe for baking cookies. Step 1: Mix ingredients. Step 2: Bake in oven. Step 3: Enjoy. You don't need to know the molecular physics of heat—you just need to know the steps to get the right outcome!`;
+}
+
 /**
  * Ask doubt endpoint handler
  */
@@ -200,7 +250,7 @@ Student Doubt:
 ${FORMAT_INSTRUCTION}`;
 
   try {
-    const interaction = await client.interactions.create({
+    const interaction = await createInteraction(client, {
       model: MODEL_NAME,
       system_instruction: SYSTEM_INSTRUCTION,
       input: fullPrompt,
@@ -215,6 +265,10 @@ ${FORMAT_INSTRUCTION}`;
     }
     return output;
   } catch (error) {
+    if (isTransientGeminiError(error)) {
+      console.warn("[StudyMate AI] Gemini remained unavailable; returning the educational fallback.");
+      return `${TEMPORARY_UNAVAILABLE_NOTICE}\n\n${getFallbackAnswer(question, level)}`;
+    }
     console.error("[StudyMate AI] Error in askDoubt:", error.message || error);
     throw error;
   }
@@ -231,13 +285,7 @@ export async function explainAction({ question, previousAnswer, action = "simple
   const client = getClient();
   if (!client) {
     console.warn("[StudyMate AI] GEMINI_API_KEY not found in backend/.env. Using smart action fallback.");
-    if (action === "summarize") {
-      return `📌 Summary & Key Takeaways\n\n• Core Concept: Break complex topics into simpler, self-contained building blocks.\n• Real-World Rule: Analogy helps bridge abstract theory into concrete understanding.\n• Best Practice: Practice with small examples before tackling large problems.\n• Exam Tip: Always state the definition, a real-world example, and key trade-offs.`;
-    } else if (action === "example") {
-      return `💡 Additional Real-Life Example\n\nImagine you are building a Lego castle. Instead of manufacturing plastic bricks from scratch, you use pre-molded standard bricks that connect seamlessly. Each brick does one job reliably, and when stacked together, they create something grand!`;
-    } else {
-      return `🧠 Explained Even Simpler\n\nLet's strip away all technical jargon!\n\nImagine explaining this to a 10-year-old:\nThink of it like following a simple recipe for baking cookies. Step 1: Mix ingredients. Step 2: Bake in oven. Step 3: Enjoy. You don't need to know the molecular physics of heat—you just need to know the steps to get the right outcome!`;
-    }
+    return getFallbackExplanation(action);
   }
 
   let actionInstruction = "";
@@ -266,7 +314,7 @@ ${actionInstruction}
 Format your response cleanly with clear headings, bullet points, and markdown formatting.`;
 
   try {
-    const interaction = await client.interactions.create({
+    const interaction = await createInteraction(client, {
       model: MODEL_NAME,
       system_instruction: SYSTEM_INSTRUCTION,
       input: prompt,
@@ -281,6 +329,10 @@ Format your response cleanly with clear headings, bullet points, and markdown fo
     }
     return output;
   } catch (error) {
+    if (isTransientGeminiError(error)) {
+      console.warn("[StudyMate AI] Gemini remained unavailable; returning the study-action fallback.");
+      return `${TEMPORARY_UNAVAILABLE_NOTICE}\n\n${getFallbackExplanation(action)}`;
+    }
     console.error("[StudyMate AI] Error in explainAction:", error.message || error);
     throw error;
   }
@@ -338,7 +390,7 @@ Specify correctIndex as 0, 1, 2, or 3.
 Provide a clear educational explanation for each answer.`;
 
   try {
-    const interaction = await client.interactions.create({
+    const interaction = await createInteraction(client, {
       model: MODEL_NAME,
       system_instruction: "You are an expert educational examiner who designs accurate, helpful multiple-choice quizzes to test student understanding.",
       input: prompt,
@@ -362,7 +414,11 @@ Provide a clear educational explanation for each answer.`;
     }
     return getFallbackQuiz(topic, level);
   } catch (error) {
-    console.error("[StudyMate AI] Error in generateQuiz:", error.message || error);
+    if (isTransientGeminiError(error)) {
+      console.warn("[StudyMate AI] Gemini remained unavailable; returning the quiz fallback.");
+    } else {
+      console.error("[StudyMate AI] Error in generateQuiz:", error.message || error);
+    }
     // If JSON parsing or model generation failed, fallback gracefully to structured quiz
     return getFallbackQuiz(topic, level);
   }
