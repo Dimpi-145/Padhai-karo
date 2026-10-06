@@ -232,6 +232,38 @@
   background: rgba(17, 24, 39, 0.6);
 }
 
+.sidebar-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+}
+
+.sidebar-account span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-account button {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  color: var(--text-secondary);
+}
+
+.sidebar-account button:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .streak-card {
   background: linear-gradient(135deg, rgba(245, 158, 11, 0.12) 0%, rgba(239, 68, 68, 0.08) 100%);
   border: 1px solid rgba(245, 158, 11, 0.25);

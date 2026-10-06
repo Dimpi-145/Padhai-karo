@@ -8,21 +8,32 @@ import QuizModal from "./components/QuizModal";
 import HistoryModal from "./components/HistoryModal";
 import SettingsModal from "./components/SettingsModal";
 import Toast from "./components/Toast";
-import { askQuestion, requestExplanation, fetchQuiz } from "./services/api";
+import {
+  askQuestion,
+  requestExplanation,
+  getCurrentUser,
+  logoutAccount
+} from "./services/api";
 import { 
-  getSavedConversations, 
   saveConversation, 
   deleteConversation, 
   clearAllConversations,
   generateChatTitle,
   getStudyStats,
   incrementQuestionsAsked,
-  getUserSettings,
-  saveUserSettings
+  saveUserSettings,
+  loadAccountStudyData,
+  clearLocalAccountCache,
+  flushRemoteWrites
 } from "./services/storage";
+import AuthScreen from "./components/AuthScreen";
 import "./App.css";
 
 export default function App() {
+  const [authSession, setAuthSession] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [studyDataLoaded, setStudyDataLoaded] = useState(false);
+  const [initializationError, setInitializationError] = useState("");
   // App state
   const [conversations, setConversations] = useState([]);
   const [activeConversationId, setActiveConversationId] = useState(null);
@@ -43,28 +54,41 @@ export default function App() {
 
   const chatEndRef = useRef(null);
 
-  // Initialize from LocalStorage
+  // Restore the secure account session from the httpOnly cookie.
   useEffect(() => {
-    const saved = getSavedConversations();
-    setConversations(saved);
-
-    const stats = getStudyStats();
-    setStudyStats(stats);
-
-    const settings = getUserSettings();
-    if (settings.defaultLevel) {
-      setLearningLevel(settings.defaultLevel);
-    }
-
-    if (saved.length > 0) {
-      setActiveConversationId(saved[0].id);
-    }
+    getCurrentUser()
+      .then(user => {
+        if (user) setAuthSession({ user, newAccount: false });
+      })
+      .catch(error => setInitializationError(error.message))
+      .finally(() => setAuthChecked(true));
   }, []);
 
-  // Save settings when learning level changes
+  // Load account-owned data and migrate the old browser data for newly registered accounts.
   useEffect(() => {
-    saveUserSettings({ defaultLevel: learningLevel });
-  }, [learningLevel]);
+    if (!authSession) return undefined;
+    let cancelled = false;
+    setStudyDataLoaded(false);
+    setInitializationError("");
+    loadAccountStudyData(authSession.newAccount, authSession.user.email)
+      .then(data => {
+        if (cancelled) return;
+        setConversations(data.conversations);
+        setStudyStats(data.stats);
+        setLearningLevel(data.settings.defaultLevel || "beginner");
+        setActiveConversationId(data.conversations[0]?.id || null);
+        setStudyDataLoaded(true);
+      })
+      .catch(error => {
+        if (!cancelled) setInitializationError(error.message);
+      });
+    return () => { cancelled = true; };
+  }, [authSession]);
+
+  // Save settings when learning level changes after account data is loaded.
+  useEffect(() => {
+    if (studyDataLoaded) saveUserSettings({ defaultLevel: learningLevel });
+  }, [learningLevel, studyDataLoaded]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -83,6 +107,36 @@ export default function App() {
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
     }, 3800);
+  };
+
+  useEffect(() => {
+    const handleStorageError = event => addToast(event.detail, "error");
+    window.addEventListener("studymate:error", handleStorageError);
+    return () => window.removeEventListener("studymate:error", handleStorageError);
+  }, []);
+
+  const handleAuthenticated = session => {
+    setInitializationError("");
+    setAuthSession(session);
+  };
+
+  const handleLogout = async () => {
+    if (isLoading) {
+      addToast("Please wait for the current study request to finish before signing out.", "info");
+      return;
+    }
+    try {
+      await flushRemoteWrites();
+      await logoutAccount();
+      clearLocalAccountCache();
+      setAuthSession(null);
+      setStudyDataLoaded(false);
+      setConversations([]);
+      setStudyStats(null);
+      setActiveConversationId(null);
+    } catch (error) {
+      addToast(error.message || "Could not sign out.", "error");
+    }
   };
 
   const removeToast = (id) => {
@@ -387,6 +441,26 @@ export default function App() {
     setQuizModalOpen(true);
   };
 
+  if (!authChecked) {
+    return <div className="auth-loading">Connecting to your StudyMate account...</div>;
+  }
+  if (!authSession) {
+    return <AuthScreen onAuthenticated={handleAuthenticated} error={initializationError} />;
+  }
+  if (!studyDataLoaded) {
+    return (
+      <div className="auth-loading">
+        {initializationError ? (
+          <>
+            <p>{initializationError}</p>
+            <button onClick={() => handleAuthenticated(authSession)}>Try again</button>
+            <button onClick={handleLogout}>Sign out</button>
+          </>
+        ) : "Loading your study data..."}
+      </div>
+    );
+  }
+
   return (
     <div className="app-container">
       {/* Left Sidebar */}
@@ -408,6 +482,8 @@ export default function App() {
         }}
         onOpenHistoryModal={() => setHistoryModalOpen(true)}
         onOpenSettingsModal={() => setSettingsModalOpen(true)}
+        accountEmail={authSession.user.email}
+        onLogout={handleLogout}
       />
 
       {/* Main Area */}

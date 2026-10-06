@@ -61,9 +61,9 @@ export default function Header({
 
       {/* AI Status Indicator */}
       <div className="header-right">
-        <div className="ai-status-badge" title="Powered by Google Gemini 3.8 Flash">
+        <div className="ai-status-badge" title="Tries local Gemma first, then Gemini if needed">
           <span className="status-dot"></span>
-          <span>Gemini 3.8 Flash</span>
+          <span>Gemma + Gemini</span>
         </div>
       </div>
     </header>

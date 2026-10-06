@@ -3,10 +3,17 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const MODEL_NAME = "gemini-3.8-flash";
+const GEMINI_MODEL_NAME = process.env.GEMINI_MODEL?.trim() || "gemini-3.8-flash";
+const GEMMA_MODEL_NAME = process.env.GEMMA_MODEL?.trim() || "gemma3:4b";
+const GEMMA_API_URL = (process.env.GEMMA_API_URL?.trim() || "http://localhost:11434").replace(/\/+$/, "");
+const AI_PROVIDER = (process.env.AI_PROVIDER?.trim() || "auto").toLowerCase();
+const parsedGemmaTimeoutMs = Number(process.env.GEMMA_TIMEOUT_MS || 120000);
+const GEMMA_TIMEOUT_MS = Number.isFinite(parsedGemmaTimeoutMs) && parsedGemmaTimeoutMs > 0
+  ? parsedGemmaTimeoutMs
+  : 120000;
 const MAX_GEMINI_RETRIES = 2;
 const TEMPORARY_UNAVAILABLE_NOTICE =
-  "Gemini is temporarily overloaded. Here's a basic study fallback; try again shortly for a Gemini response.";
+  "AI generation is unavailable right now. Here's a basic study fallback. Check that Ollama is running or that your Gemini API quota is available.";
 
 const SYSTEM_INSTRUCTION = `You are StudyMate AI, a friendly, patient and highly effective AI tutor.
 
@@ -29,9 +36,9 @@ For academic questions, prioritize correctness and clarity.
 For exam mode, focus on definitions, important points, examples and likely exam questions.`;
 
 /**
- * Helper to get the GoogleGenAI client instance
+ * Helper to get the GoogleGenAI client instance.
  */
-function getClient() {
+function getGeminiClient() {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
     return null;
@@ -39,19 +46,79 @@ function getClient() {
   return new GoogleGenAI({ apiKey });
 }
 
+export function getAiProviderStatus() {
+  return {
+    provider: AI_PROVIDER,
+    primaryModel: AI_PROVIDER === "gemini" ? GEMINI_MODEL_NAME : GEMMA_MODEL_NAME,
+    gemini: {
+      configured: !!process.env.GEMINI_API_KEY?.trim(),
+      model: GEMINI_MODEL_NAME
+    },
+    gemma: {
+      configured: !!(GEMMA_API_URL && GEMMA_MODEL_NAME),
+      model: GEMMA_MODEL_NAME,
+      apiUrl: GEMMA_API_URL
+    }
+  };
+}
+
 function isTransientGeminiError(error) {
   const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
-  return status === 408 || status === 429 || (status >= 500 && status < 600) ||
-    /\b(?:408|429|5\d{2})\b|overloaded|high demand|temporarily unavailable|try again later/i
+  return error?.name === "APIConnectionError" ||
+    status === 408 || status === 429 || (status >= 500 && status < 600) ||
+    /\b(?:408|429|5\d{2})\b|overloaded|high demand|temporarily unavailable|try again later|fetch failed|network|unusable/i
       .test(error?.message || "");
 }
 
-async function createInteraction(client, request) {
+function shouldRetryGeminiError(error) {
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
+  const message = error?.message || "";
+  if (status === 429 && /quota|RESOURCE_EXHAUSTED|retry in/i.test(message)) {
+    return false;
+  }
+  return isTransientGeminiError(error);
+}
+
+function isRecoverableAiError(error) {
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
+  return isTransientGeminiError(error) ||
+    error?.name === "AbortError" ||
+    status === 404 ||
+    /ollama|gemma|model.*not found|connection|connect|econnrefused|timeout|terminated|not configured|No AI provider/i.test(error?.message || "");
+}
+
+function getSafeProviderErrorMessage(error) {
+  const message = String(error?.message || error);
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  return apiKey ? message.replaceAll(apiKey, "[redacted]") : message;
+}
+
+async function generateGeminiText(client, {
+  contents,
+  systemInstruction,
+  temperature = 0.7,
+  responseMimeType,
+  responseJsonSchema
+}) {
+  const config = { temperature };
+  if (systemInstruction) config.systemInstruction = systemInstruction;
+  if (responseMimeType) config.responseMimeType = responseMimeType;
+  if (responseJsonSchema) config.responseJsonSchema = responseJsonSchema;
+
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await client.interactions.create(request);
+      const response = await client.models.generateContent({
+        model: GEMINI_MODEL_NAME,
+        contents,
+        config
+      });
+      const output = response.text?.trim();
+      if (!output) {
+        throw new Error("Empty response from Gemini API");
+      }
+      return output;
     } catch (error) {
-      if (!isTransientGeminiError(error) || attempt >= MAX_GEMINI_RETRIES) {
+      if (!shouldRetryGeminiError(error) || attempt >= MAX_GEMINI_RETRIES) {
         throw error;
       }
 
@@ -62,6 +129,96 @@ async function createInteraction(client, request) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
   }
+}
+
+async function generateGemmaText({
+  contents,
+  systemInstruction,
+  temperature = 0.7,
+  responseMimeType,
+  responseJsonSchema
+}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), GEMMA_TIMEOUT_MS);
+
+  try {
+    const body = {
+      model: GEMMA_MODEL_NAME,
+      prompt: contents,
+      stream: false,
+      options: { temperature }
+    };
+    if (systemInstruction) body.system = systemInstruction;
+    if (responseJsonSchema) {
+      body.format = responseJsonSchema;
+    } else if (responseMimeType === "application/json") {
+      body.format = "json";
+    }
+
+    const response = await fetch(`${GEMMA_API_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data?.error || `Ollama request failed with status ${response.status}`);
+    }
+
+    const output = data?.response?.trim();
+    if (!output) {
+      throw new Error("Empty response from Gemma/Ollama");
+    }
+    return output;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function generateAiText(request) {
+  const provider = ["auto", "gemini", "gemma"].includes(AI_PROVIDER) ? AI_PROVIDER : "auto";
+  const providerErrors = [];
+
+  if (provider !== "gemini") {
+    try {
+      return await generateGemmaText(request);
+    } catch (error) {
+      providerErrors.push(`Gemma: ${error.message || error}`);
+      console.warn(`[StudyMate AI] Gemma/Ollama request failed: ${getSafeProviderErrorMessage(error)}`);
+      if (provider === "gemma" && !isRecoverableAiError(error)) {
+        throw error;
+      }
+      if (provider === "gemma") {
+        console.warn("[StudyMate AI] Gemma/Ollama unavailable; using study fallback when needed.");
+      } else {
+        console.warn("[StudyMate AI] Gemma/Ollama unavailable; trying Gemini fallback.");
+      }
+    }
+  }
+
+  if (provider !== "gemma") {
+    const geminiClient = getGeminiClient();
+    if (geminiClient) {
+      try {
+        return await generateGeminiText(geminiClient, request);
+      } catch (error) {
+        providerErrors.push(`Gemini: ${error.message || error}`);
+        console.warn(`[StudyMate AI] Gemini request failed: ${getSafeProviderErrorMessage(error)}`);
+        if (provider === "gemini" || !isRecoverableAiError(error)) {
+          throw error;
+        }
+        console.warn(
+          "[StudyMate AI] Gemini unavailable; using study fallback when needed."
+        );
+      }
+    } else if (provider === "gemini") {
+      throw new Error("GEMINI_API_KEY is not configured.");
+    }
+  }
+
+  throw new Error(providerErrors.join(" | ") || "No AI provider is configured.");
 }
 
 /**
@@ -225,12 +382,6 @@ export async function askDoubt({ question, level = "beginner", history = [] }) {
     throw new Error("Question cannot be empty");
   }
 
-  const client = getClient();
-  if (!client) {
-    console.warn("[StudyMate AI] GEMINI_API_KEY not found in backend/.env. Using smart educational fallback.");
-    return getFallbackAnswer(question, level);
-  }
-
   const levelPrompt = getLevelPrompt(level);
   
   // Format recent history (limit to last 6 messages to stay token efficient)
@@ -250,23 +401,14 @@ Student Doubt:
 ${FORMAT_INSTRUCTION}`;
 
   try {
-    const interaction = await createInteraction(client, {
-      model: MODEL_NAME,
-      system_instruction: SYSTEM_INSTRUCTION,
-      input: fullPrompt,
-      generation_config: {
-        temperature: 0.7,
-      }
+    return await generateAiText({
+      contents: fullPrompt,
+      systemInstruction: SYSTEM_INSTRUCTION,
+      temperature: 0.7
     });
-
-    const output = interaction.output_text?.trim();
-    if (!output) {
-      throw new Error("Empty response from Gemini API");
-    }
-    return output;
   } catch (error) {
-    if (isTransientGeminiError(error)) {
-      console.warn("[StudyMate AI] Gemini remained unavailable; returning the educational fallback.");
+    if (isRecoverableAiError(error)) {
+      console.warn("[StudyMate AI] AI providers remained unavailable; returning the educational fallback.");
       return `${TEMPORARY_UNAVAILABLE_NOTICE}\n\n${getFallbackAnswer(question, level)}`;
     }
     console.error("[StudyMate AI] Error in askDoubt:", error.message || error);
@@ -280,12 +422,6 @@ ${FORMAT_INSTRUCTION}`;
 export async function explainAction({ question, previousAnswer, action = "simpler" }) {
   if (!question && !previousAnswer) {
     throw new Error("Either question or previous answer must be provided");
-  }
-
-  const client = getClient();
-  if (!client) {
-    console.warn("[StudyMate AI] GEMINI_API_KEY not found in backend/.env. Using smart action fallback.");
-    return getFallbackExplanation(action);
   }
 
   let actionInstruction = "";
@@ -314,23 +450,14 @@ ${actionInstruction}
 Format your response cleanly with clear headings, bullet points, and markdown formatting.`;
 
   try {
-    const interaction = await createInteraction(client, {
-      model: MODEL_NAME,
-      system_instruction: SYSTEM_INSTRUCTION,
-      input: prompt,
-      generation_config: {
-        temperature: 0.7,
-      }
+    return await generateAiText({
+      contents: prompt,
+      systemInstruction: SYSTEM_INSTRUCTION,
+      temperature: 0.7
     });
-
-    const output = interaction.output_text?.trim();
-    if (!output) {
-      throw new Error("Empty response from Gemini API");
-    }
-    return output;
   } catch (error) {
-    if (isTransientGeminiError(error)) {
-      console.warn("[StudyMate AI] Gemini remained unavailable; returning the study-action fallback.");
+    if (isRecoverableAiError(error)) {
+      console.warn("[StudyMate AI] AI providers remained unavailable; returning the study-action fallback.");
       return `${TEMPORARY_UNAVAILABLE_NOTICE}\n\n${getFallbackExplanation(action)}`;
     }
     console.error("[StudyMate AI] Error in explainAction:", error.message || error);
@@ -344,12 +471,6 @@ Format your response cleanly with clear headings, bullet points, and markdown fo
 export async function generateQuiz({ topic, level = "beginner" }) {
   if (!topic || typeof topic !== "string" || !topic.trim()) {
     throw new Error("Topic cannot be empty");
-  }
-
-  const client = getClient();
-  if (!client) {
-    console.warn("[StudyMate AI] GEMINI_API_KEY not found in backend/.env. Using smart quiz fallback.");
-    return getFallbackQuiz(topic, level);
   }
 
   const quizJsonSchema = {
@@ -387,24 +508,17 @@ export async function generateQuiz({ topic, level = "beginner" }) {
 Make sure there are exactly 3 questions.
 Each question must have exactly 4 choices (A, B, C, D).
 Specify correctIndex as 0, 1, 2, or 3.
-Provide a clear educational explanation for each answer.`;
+Provide a clear educational explanation for each answer.
+Respond only with valid JSON that matches the requested quiz shape.`;
 
   try {
-    const interaction = await createInteraction(client, {
-      model: MODEL_NAME,
-      system_instruction: "You are an expert educational examiner who designs accurate, helpful multiple-choice quizzes to test student understanding.",
-      input: prompt,
-      response_format: {
-        type: "text",
-        mime_type: "application/json",
-        schema: quizJsonSchema
-      }
+    const output = await generateAiText({
+      contents: prompt,
+      systemInstruction: "You are an expert educational examiner who designs accurate, helpful multiple-choice quizzes to test student understanding.",
+      temperature: 0.4,
+      responseMimeType: "application/json",
+      responseJsonSchema: quizJsonSchema
     });
-
-    const output = interaction.output_text?.trim();
-    if (!output) {
-      throw new Error("Empty response from Gemini API");
-    }
 
     const parsed = JSON.parse(output);
     if (parsed && Array.isArray(parsed.quiz) && parsed.quiz.length > 0) {
@@ -414,8 +528,8 @@ Provide a clear educational explanation for each answer.`;
     }
     return getFallbackQuiz(topic, level);
   } catch (error) {
-    if (isTransientGeminiError(error)) {
-      console.warn("[StudyMate AI] Gemini remained unavailable; returning the quiz fallback.");
+    if (isRecoverableAiError(error)) {
+      console.warn("[StudyMate AI] AI providers remained unavailable; returning the quiz fallback.");
     } else {
       console.error("[StudyMate AI] Error in generateQuiz:", error.message || error);
     }

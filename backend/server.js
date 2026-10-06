@@ -1,7 +1,10 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { askDoubt, explainAction, generateQuiz } from "./gemini.js";
+import { askDoubt, explainAction, generateQuiz, getAiProviderStatus } from "./gemini.js";
+import authRouter from "./auth.js";
+import studyDataRouter from "./study-data.js";
+import { closeDatabase, connectToDatabase } from "./db.js";
 
 dotenv.config();
 
@@ -10,22 +13,45 @@ const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
+  origin: process.env.FRONTEND_ORIGIN || true,
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 app.use(express.json({ limit: "5mb" }));
+app.use((req, _res, next) => {
+  const cookies = req.headers.cookie || "";
+  req.cookies = Object.fromEntries(
+    cookies.split(";").filter(Boolean).map(cookie => {
+      const separator = cookie.indexOf("=");
+      const name = cookie.slice(0, separator).trim();
+      const value = cookie.slice(separator + 1).trim();
+      return [name, decodeURIComponent(value)];
+    })
+  );
+  next();
+});
+app.use("/api/auth", authRouter);
+app.use("/api/study-data", studyDataRouter);
 
 // Standard user-facing error message
 const CLIENT_ERROR_MESSAGE = "Something went wrong while connecting to StudyMate AI. Please try again.";
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
+  const aiProvider = getAiProviderStatus();
   res.json({
     status: "ok",
     service: "StudyMate AI Backend",
-    model: "gemini-3.8-flash",
-    apiKeyConfigured: !!(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim())
+    aiProvider: aiProvider.provider,
+    model: aiProvider.primaryModel,
+    models: {
+      gemini: aiProvider.gemini.model,
+      gemma: aiProvider.gemma.model
+    },
+    apiKeyConfigured: aiProvider.gemini.configured,
+    geminiConfigured: aiProvider.gemini.configured,
+    gemmaConfigured: aiProvider.gemma.configured
   });
 });
 
@@ -115,13 +141,39 @@ app.use((req, res) => {
   res.status(404).json({ error: "Endpoint not found" });
 });
 
-// Start Express server
-app.listen(PORT, () => {
+app.use((error, _req, res, _next) => {
+  console.error("[StudyMate AI Backend] Request failed:", error?.message || error);
+  return res.status(500).json({ error: "The request could not be completed. Please try again." });
+});
+
+if (!process.env.JWT_SECRET?.trim() || Buffer.byteLength(process.env.JWT_SECRET.trim()) < 32) {
+  throw new Error("JWT_SECRET must contain at least 32 bytes. Add a private secret to backend/.env.");
+}
+
+await connectToDatabase();
+
+const server = app.listen(PORT, () => {
+  const aiProvider = getAiProviderStatus();
   console.log(`[StudyMate AI Backend] Server running on http://localhost:${PORT}`);
-  console.log(`[StudyMate AI Backend] Gemini Model: gemini-3.8-flash`);
-  if (!process.env.GEMINI_API_KEY) {
-    console.log(`[StudyMate AI Backend] Notice: GEMINI_API_KEY is not set in backend/.env. Using smart fallback for smooth demo testing.`);
+  console.log(`[StudyMate AI Backend] AI Provider: ${aiProvider.provider}`);
+  console.log(`[StudyMate AI Backend] Gemini Model: ${aiProvider.gemini.model}`);
+  console.log(`[StudyMate AI Backend] Gemma Model: ${aiProvider.gemma.model} via ${aiProvider.gemma.apiUrl}`);
+  if (!aiProvider.gemini.configured) {
+    console.log("[StudyMate AI Backend] Notice: GEMINI_API_KEY is not set. Ensure Ollama is running with the configured Gemma model.");
   } else {
-    console.log(`[StudyMate AI Backend] Gemini API Key is configured and ready.`);
+    console.log("[StudyMate AI Backend] Gemini API Key is configured and ready.");
   }
 });
+
+async function shutdown() {
+  server.close(async error => {
+    if (error) {
+      console.error("[StudyMate AI Backend] Error closing server:", error);
+      process.exitCode = 1;
+    }
+    await closeDatabase();
+  });
+}
+
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);

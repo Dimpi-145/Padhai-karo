@@ -1,7 +1,7 @@
 # 🎓 StudyMate AI — Personalized AI Study Buddy
 
 > **"Learn anything. Understand everything."**  
-> An AI-powered student learning companion built for hackathons, powered by Google's latest **Gemini 3.8 Flash** model via the official `@google/genai` SDK.
+> An AI-powered student learning companion built for hackathons, preferring local **Gemma** through Ollama, with **Gemini** as an automatic fallback.
 
 ---
 
@@ -27,7 +27,7 @@ $$\text{LEARN} \longrightarrow \text{UNDERSTAND} \longrightarrow \text{PRACTICE}
 - **Structured Explanations**: Responses are automatically segmented into *Simple Explanation*, *Real-Life Example*, *Key Points*, *Practical Code/Illustration*, and a *Quick Check*.
 - **Instant AI Action Buttons**: Refine any answer on-demand with `[Explain Simpler]`, `[Give Example]`, `[Summarize]`, and `[Generate Quiz]`.
 - **Dynamic 3-Question MCQ Quizzes**: Test knowledge with real-time AI-generated quizzes complete with instant feedback, scoring, and per-question rationale.
-- **Local Persistence & Motivation**: Stores study history, question counts, and a daily **Study Streak (🔥)** right in the browser via `localStorage`—no complex databases required.
+- **Account Persistence & Motivation**: Saves study history, question counts, settings, and daily **Study Streak (🔥)** in MongoDB, scoped to the signed-in account and synced across devices.
 
 ---
 
@@ -37,7 +37,7 @@ $$\text{LEARN} \longrightarrow \text{UNDERSTAND} \longrightarrow \text{PRACTICE}
                +--------------------------------------------------+
                |                  1. LEARN                        |
                |  Student asks doubt or picks suggested topic     |
-               |  Gemini 3.8 Flash delivers structured tutor view |
+               |  Gemma delivers a structured tutor view          |
                +--------------------------------------------------+
                                         |
                                         v
@@ -59,7 +59,7 @@ $$\text{LEARN} \longrightarrow \text{UNDERSTAND} \longrightarrow \text{PRACTICE}
 
 ## ✨ Key Features
 
-- **Personalized AI Tutor**: System instructions train Gemini 3.8 Flash to be patient, encouraging, and pedagogically sound.
+- **Personalized AI Tutor**: System instructions guide the selected AI model to be patient, encouraging, and pedagogically sound.
 - **Answer Structure**:
   - 🧠 **Simple Explanation**: Clear, level-adapted breakdown.
   - 💡 **Real-Life Example**: Everyday analogy that makes the concept click.
@@ -79,9 +79,10 @@ $$\text{LEARN} \longrightarrow \text{UNDERSTAND} \longrightarrow \text{PRACTICE}
 - **Study Streak & Progress Counter**:
   - 🔥 Daily Study Streak tracker.
   - Total doubts asked, quizzes completed, and topics mastered.
-- **Local Session Management**:
+- **Account Session Management**:
   - Automatic conversation titles generated from the student's first question.
   - Full history browsing, searching, resuming, and deletion.
+  - Email/password sign-in with hashed passwords and secure, HTTP-only session cookies.
 - **Dark Mode SaaS Dashboard**:
   - Sleek, modern slate theme with subtle glassmorphism.
   - Responsive mobile drawer navigation.
@@ -96,10 +97,10 @@ $$\text{LEARN} \longrightarrow \text{UNDERSTAND} \longrightarrow \text{PRACTICE}
 |---|---|
 | **Frontend** | React 18, Vite, JavaScript (ES Modules), CSS3 Variables |
 | **Icons & UI** | `lucide-react`, `canvas-confetti`, `react-markdown` |
-| **Backend** | Node.js (v22+), Express.js, CORS, Dotenv |
-| **AI Engine** | Google Gemini API (`gemini-3.8-flash`) |
-| **AI SDK** | Google Official `@google/genai` (Node.js SDK) |
-| **Storage** | Browser `localStorage` (Privacy-preserving, zero database setup) |
+| **Backend** | Node.js (v22+), Express.js, MongoDB Node.js Driver, bcryptjs, jsonwebtoken |
+| **AI Engine** | Local Gemma (`gemma3:4b`) via Ollama, then Google Gemini API fallback |
+| **AI SDK** | Ollama local API, Google Official `@google/genai` (optional) |
+| **Storage** | MongoDB (account-scoped sessions, stats, and settings) |
 
 ---
 
@@ -110,7 +111,7 @@ $$\text{LEARN} \longrightarrow \text{UNDERSTAND} \longrightarrow \text{PRACTICE}
 │             React Frontend (Vite)            │
 │  - Educational Dashboard & Level Selector    │
 │  - Chat Stream, Markdown, Quiz Modal         │
-│  - LocalStorage (History, Streak, Stats)     │
+│  - MongoDB API (Account History, Stats)      │
 └──────────────────────┬───────────────────────┘
                        │ HTTP REST (Proxy /api)
                        ▼
@@ -120,20 +121,28 @@ $$\text{LEARN} \longrightarrow \text{UNDERSTAND} \longrightarrow \text{PRACTICE}
 │  - POST /api/explain                         │
 │  - POST /api/quiz                            │
 │  - GET  /api/health                          │
+│  - /api/auth (register, login, session)      │
+│  - /api/study-data (account-scoped records)  │
 │  - Error Handling & Input Validation         │
-└──────────────────────┬───────────────────────┘
-                       │ Official @google/genai SDK
-                       ▼
+└──────────────┬─────────────────────┬─────────┘
+               │ MongoDB Driver      │ Gemini SDK
+               ▼                     ▼
 ┌──────────────────────────────────────────────┐
-│           Google Gemini 3.8 Flash            │
-│  - System Prompt: Patient & Friendly Tutor   │
-│  - Structured Educational JSON Quizzes       │
+│          MongoDB (Atlas or local)            │
+│  - Hashed account credentials                │
+│  - Per-account conversations and stats       │
 └──────────────────────────────────────────────┘
+                                      ┌────────────────────────────────┐
+                                      │ Local Gemma via Ollama (default)│
+                                      │ Optional Google Gemini API      │
+                                      └────────────────────────────────┘
 ```
 
 ### 🔒 Security Principles
 - **No Frontend Exposure**: `GEMINI_API_KEY` is kept strictly on the Express server in `backend/.env`.
 - **No `VITE_GEMINI_API_KEY`**: Client code never talks directly to Google AI endpoints.
+- **Account Security**: Passwords are hashed with bcrypt; sessions use signed, HTTP-only, same-site cookies.
+- **User Data Isolation**: Database reads, updates, and deletes are scoped to the authenticated account.
 - **Error Obfuscation**: Upstream API errors or sensitive tokens are never passed back to the client; user-friendly error banners are shown instead.
 
 ---
@@ -141,9 +150,11 @@ $$\text{LEARN} \longrightarrow \text{UNDERSTAND} \longrightarrow \text{PRACTICE}
 ## 🚀 Getting Started
 
 ### Prerequisites
-- Node.js (v18 or higher recommended; v22 supported)
+- Node.js (v20 or higher; v22 supported)
 - npm (v9 or higher)
-- A Google Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
+- Ollama with the `gemma3:4b` model (`ollama pull gemma3:4b`) for local-first inference
+- A Google Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey) for automatic fallback (optional if you only want local Gemma)
+- A MongoDB Atlas cluster or local MongoDB instance
 
 ---
 
@@ -162,16 +173,37 @@ npm install
 
 Create `backend/.env` (or copy from `backend/.env.example`):
 
-```bash
-cp .env.example .env
+```powershell
+Copy-Item .env.example .env
 ```
 
-Add your Gemini API key in `backend/.env`:
+Configure `backend/.env` with your MongoDB connection string and a private session secret. The default `AI_PROVIDER=auto` tries local Gemma first, then Gemini if Ollama is unavailable:
 
 ```env
-GEMINI_API_KEY=your_actual_gemini_api_key_here
+AI_PROVIDER=auto
+GEMMA_API_URL=http://localhost:11434
+GEMMA_MODEL=gemma3:4b
 PORT=5000
+MONGODB_URI=mongodb+srv://<username>:<password>@<cluster-url>/?retryWrites=true&w=majority
+MONGODB_DATABASE=studymate
+JWT_SECRET=replace_with_a_random_secret
 ```
+
+Replace the MongoDB placeholders with your database user and cluster details. Generate a session secret with:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+Start Ollama and make sure the model is available before asking questions:
+
+```bash
+ollama pull gemma3:4b
+```
+
+Set `AI_PROVIDER=gemma` to require local Gemma only, or `AI_PROVIDER=gemini` to use Gemini only.
+
+The backend will not start until it connects to MongoDB and `MONGODB_URI` is configured. Never commit `.env` or share its secrets.
 
 Start the backend:
 
@@ -184,6 +216,7 @@ npm start
 ```
 
 Backend will be running at `http://localhost:5000`.
+Create an account from the frontend. Existing browser-saved study sessions and settings are imported the first time a new account is registered.
 
 ### 3. Frontend Setup
 

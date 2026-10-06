@@ -70,10 +70,10 @@ export default function SettingsModal({
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: 600, fontSize: "0.88rem", color: "#a5b4fc", marginBottom: "6px" }}>
               <Cpu size={16} />
-              <span>AI Engine: Google Gemini 3.8 Flash</span>
+              <span>AI Engine: Gemma first, Gemini fallback</span>
             </div>
             <p style={{ fontSize: "0.8rem", color: "#94a3b8", lineHeight: 1.5 }}>
-              Powered by Google's official <code>@google/genai</code> SDK using the flagship <code>gemini-3.8-flash</code> model for lightning-fast explanations and dynamically structured student quizzes.
+              Tries the local <code>gemma3:4b</code> model through Ollama for tutoring, explanations, and quizzes, then falls back to Gemini if local inference is unavailable. Set <code>AI_PROVIDER=gemma</code> or <code>AI_PROVIDER=gemini</code> to force one provider.
             </p>
           </div>
 
@@ -89,11 +89,11 @@ export default function SettingsModal({
               <span>Zero Frontend Key Exposure</span>
             </div>
             <p style={{ fontSize: "0.8rem", color: "#94a3b8", lineHeight: 1.5 }}>
-              All Gemini API requests are safely mediated through your secure Express.js backend. No API keys are ever stored or exposed in client-side code.
+              All AI requests are safely mediated through your secure Express.js backend. No API keys are ever stored or exposed in client-side code.
             </p>
           </div>
 
-          {/* Local Storage Stats */}
+          {/* Account Storage Stats */}
           <div style={{
             background: "rgba(30, 41, 59, 0.4)",
             border: "1px solid rgba(255, 255, 255, 0.08)",
@@ -107,7 +107,7 @@ export default function SettingsModal({
               <Database size={16} color="#818cf8" />
               <div>
                 <div style={{ fontSize: "0.86rem", fontWeight: 600, color: "#fff" }}>
-                  Local Storage
+                  MongoDB Account Storage
                 </div>
                 <div style={{ fontSize: "0.75rem", color: "#94a3b8" }}>
                   {conversationsCount} saved study sessions

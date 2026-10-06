@@ -1,6 +1,7 @@
 import React from "react";
 import { 
   GraduationCap, 
+  LogOut,
   Plus, 
   MessageSquare, 
   HelpCircle, 
@@ -25,7 +26,9 @@ export default function Sidebar({
   onClose,
   onOpenQuizModal,
   onOpenHistoryModal,
-  onOpenSettingsModal
+  onOpenSettingsModal,
+  accountEmail,
+  onLogout
 }) {
   return (
     <>
@@ -172,6 +175,12 @@ export default function Sidebar({
 
         {/* Study Streak & Stats Footer */}
         <div className="sidebar-footer">
+          <div className="sidebar-account">
+            <span title={accountEmail}>{accountEmail}</span>
+            <button onClick={onLogout} title="Sign out" aria-label="Sign out">
+              <LogOut size={15} />
+            </button>
+          </div>
           <div className="streak-card">
             <div className="streak-card-top">
               <div className="streak-title-badge">
